@@ -10,8 +10,8 @@ export default function TypewriterText({ text, delay = 0 }: { text: string; dela
   useEffect(() => {
     const controls = animate(count, text.length, {
       type: "tween",
-      duration: 3, // Slow motion typing
-      ease: "easeInOut",
+      duration: 5, // Even slower motion typing
+      ease: "linear",
       delay: delay,
       onComplete: () => setDone(true),
     });

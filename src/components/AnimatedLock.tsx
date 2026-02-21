@@ -7,23 +7,23 @@ export default function AnimatedLock() {
     <div className="relative w-5 h-5 flex items-center justify-center text-emerald-500">
       <motion.div
         animate={{ 
-          y: [0, -2, 2, 0],
-          x: [-1, 1, -1, 1, 0],
-          rotate: [0, 2, -2, 0]
+          y: [0, -3, 3, 0],
+          x: [-2, 2, -2, 2, 0],
+          rotate: [0, 5, -5, 0]
         }}
         transition={{ 
-          duration: 8, // Very slow water-flow like movement
+          duration: 15, // Extremely slow water-flow like movement
           repeat: Infinity,
-          ease: "easeInOut"
+          ease: "linear" // Linear for smoother continuous flow
         }}
         className="flex items-center justify-center"
       >
         <motion.div
           animate={{ 
-            scale: [1, 1.1, 1],
+            scale: [1, 1.15, 1],
           }}
           transition={{ 
-            duration: 4, // Slow motion pulse
+            duration: 6, // Even slower motion pulse
             repeat: Infinity,
             ease: "easeInOut"
           }}
@@ -32,9 +32,9 @@ export default function AnimatedLock() {
             initial={{ opacity: 1 }}
             animate={{ opacity: [1, 0, 1] }}
             transition={{ 
-              duration: 3, // Very slow lock/unlock
+              duration: 5, // Very slow lock/unlock
               repeat: Infinity,
-              repeatDelay: 2,
+              repeatDelay: 4,
               ease: "easeInOut"
             }}
             className="absolute inset-0 flex items-center justify-center"
@@ -45,9 +45,9 @@ export default function AnimatedLock() {
             initial={{ opacity: 0 }}
             animate={{ opacity: [0, 1, 0] }}
             transition={{ 
-              duration: 3, // Very slow lock/unlock
+              duration: 5, // Very slow lock/unlock
               repeat: Infinity,
-              repeatDelay: 2,
+              repeatDelay: 4,
               ease: "easeInOut"
             }}
             className="absolute inset-0 flex items-center justify-center"

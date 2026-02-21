@@ -33,9 +33,12 @@ db.exec(`
     role TEXT DEFAULT 'member',
     PRIMARY KEY (group_id, user_id)
   );
+`);
 
-  ALTER TABLE group_members ADD COLUMN last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP;
+try { db.exec("ALTER TABLE group_members ADD COLUMN last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP;"); } catch (e) {}
+try { db.exec("ALTER TABLE messages ADD COLUMN reply_to_id TEXT;"); } catch (e) {}
 
+db.exec(`
   CREATE TABLE IF NOT EXISTS group_invites (
     token TEXT PRIMARY KEY,
     group_id TEXT,
@@ -50,7 +53,8 @@ db.exec(`
     sender_id TEXT,
     content TEXT, -- Encrypted content (base64)
     iv TEXT,      -- Initialization vector (base64)
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reply_to_id TEXT
   );
 `);
 
@@ -82,6 +86,18 @@ async function startServer() {
   app.get("/api/users", (req, res) => {
     const users = db.prepare("SELECT id, username, public_key FROM users").all();
     res.json(users);
+  });
+
+  app.put("/api/users/:userId", (req, res) => {
+    const { username } = req.body;
+    db.prepare("UPDATE users SET username = ? WHERE id = ?").run(username, req.params.userId);
+    res.json({ success: true });
+  });
+
+  app.put("/api/users/:userId/keys", (req, res) => {
+    const { publicKey } = req.body;
+    db.prepare("UPDATE users SET public_key = ? WHERE id = ?").run(publicKey, req.params.userId);
+    res.json({ success: true });
   });
 
   app.post("/api/groups", (req, res) => {
@@ -193,9 +209,12 @@ async function startServer() {
 
   app.get("/api/groups/:groupId/messages", (req, res) => {
     const messages = db.prepare(`
-      SELECT m.*, u.username as sender_name 
+      SELECT m.*, u.username as sender_name,
+             pm.content as reply_to_content, pm.iv as reply_to_iv, pu.username as reply_to_sender_name
       FROM messages m 
       JOIN users u ON m.sender_id = u.id 
+      LEFT JOIN messages pm ON m.reply_to_id = pm.id
+      LEFT JOIN users pu ON pm.sender_id = pu.id
       WHERE m.group_id = ? 
       ORDER BY m.created_at ASC 
       LIMIT 100
@@ -225,12 +244,29 @@ async function startServer() {
       }
 
       if (message.type === "chat") {
-        const { groupId, senderId, content, iv } = message;
+        const { groupId, senderId, content, iv, replyToId } = message;
         const msgId = uuidv4();
-        db.prepare("INSERT INTO messages (id, group_id, sender_id, content, iv) VALUES (?, ?, ?, ?, ?)").run(msgId, groupId, senderId, content, iv);
+        db.prepare("INSERT INTO messages (id, group_id, sender_id, content, iv, reply_to_id) VALUES (?, ?, ?, ?, ?, ?)").run(msgId, groupId, senderId, content, iv, replyToId || null);
         
         const sender = db.prepare("SELECT username FROM users WHERE id = ?").get(senderId) as any;
         
+        let replyToData = null;
+        if (replyToId) {
+          const parentMsg = db.prepare(`
+            SELECT m.content, m.iv, u.username as sender_name 
+            FROM messages m 
+            JOIN users u ON m.sender_id = u.id 
+            WHERE m.id = ?
+          `).get(replyToId) as any;
+          if (parentMsg) {
+            replyToData = {
+              content: parentMsg.content,
+              iv: parentMsg.iv,
+              senderName: parentMsg.sender_name
+            };
+          }
+        }
+
         // Broadcast to group members
         const members = db.prepare("SELECT user_id FROM group_members WHERE group_id = ?").all(groupId) as any[];
         const payload = JSON.stringify({
@@ -241,6 +277,10 @@ async function startServer() {
           senderName: sender.username,
           content,
           iv,
+          replyToId,
+          replyToContent: replyToData?.content,
+          replyToIv: replyToData?.iv,
+          replyToSenderName: replyToData?.senderName,
           created_at: new Date().toISOString()
         });
 
@@ -248,6 +288,28 @@ async function startServer() {
           const client = clients.get(member.user_id);
           if (client && client.readyState === WebSocket.OPEN) {
             client.send(payload);
+          }
+        });
+      }
+
+      if (message.type === "typing") {
+        const { groupId, userId, username, isTyping } = message;
+        const members = db.prepare("SELECT user_id FROM group_members WHERE group_id = ?").all(groupId) as any[];
+        
+        const payload = JSON.stringify({
+          type: "typing",
+          groupId,
+          userId,
+          username,
+          isTyping
+        });
+
+        members.forEach(member => {
+          if (member.user_id !== userId) {
+            const client = clients.get(member.user_id);
+            if (client && client.readyState === WebSocket.OPEN) {
+              client.send(payload);
+            }
           }
         });
       }

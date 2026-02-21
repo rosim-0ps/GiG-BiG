@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, ChangeEvent } from 'react';
 import { 
   generateIdentityKeyPair, 
   exportPublicKey, 
@@ -15,7 +15,7 @@ import {
   encryptGroupKeyWithSecret,
   decryptGroupKeyWithSecret
 } from '../lib/crypto';
-import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check } from 'lucide-react';
+import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check, Reply, X, Settings, User as UserIcon, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Logo from './Logo';
 import AnimatedLock from './AnimatedLock';
@@ -46,6 +46,11 @@ interface Message {
   iv: string;
   created_at: string;
   decryptedContent?: string;
+  replyToId?: string;
+  replyToContent?: string;
+  replyToIv?: string;
+  replyToSenderName?: string;
+  decryptedReplyContent?: string;
 }
 
 export default function Messenger() {
@@ -69,12 +74,18 @@ export default function Messenger() {
   const [inviteExpiration, setInviteExpiration] = useState('1h');
   const [pendingInvite, setPendingInvite] = useState<{ token: string, secret: string, groupName: string } | null>(null);
   const [undoLeave, setUndoLeave] = useState<{ groupId: string, groupName: string, timer: any } | null>(null);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string[]>>({});
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [showProfile, setShowProfile] = useState(false);
+  const [profileUsername, setProfileUsername] = useState('');
+  const [isRotating, setIsRotating] = useState(false);
   
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeGroupRef = useRef<Group | null>(null);
+  const typingTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     activeGroupRef.current = activeGroup;
@@ -136,10 +147,18 @@ export default function Messenger() {
           if (groupKey) {
             try {
               const decrypted = await decryptMessage(data.content, data.iv, groupKey);
+              let decryptedReply = undefined;
+              if (data.replyToContent && data.replyToIv) {
+                try {
+                  decryptedReply = await decryptMessage(data.replyToContent, data.replyToIv, groupKey);
+                } catch (e) {
+                  decryptedReply = "[Encrypted Reply]";
+                }
+              }
               
               // If this is the active group, add to messages
               if (activeGroupRef.current?.id === data.groupId) {
-                setMessages(prev => [...prev, { ...data, decryptedContent: decrypted }]);
+                setMessages(prev => [...prev, { ...data, decryptedContent: decrypted, decryptedReplyContent: decryptedReply }]);
                 // Mark as read on server
                 fetch(`/api/groups/${data.groupId}/read`, {
                   method: 'POST',
@@ -163,6 +182,18 @@ export default function Messenger() {
               console.error("Failed to decrypt message", e);
             }
           }
+        } else if (data.type === 'typing') {
+          setTypingUsers(prev => {
+            const groupTyping = prev[data.groupId] || [];
+            if (data.isTyping) {
+              if (!groupTyping.includes(data.username)) {
+                return { ...prev, [data.groupId]: [...groupTyping, data.username] };
+              }
+            } else {
+              return { ...prev, [data.groupId]: groupTyping.filter(u => u !== data.username) };
+            }
+            return prev;
+          });
         }
       };
 
@@ -350,6 +381,35 @@ export default function Messenger() {
     g.name.toLowerCase().includes(groupSearchQuery.toLowerCase())
   );
 
+  const handleTyping = (e: ChangeEvent<HTMLInputElement>) => {
+    setNewMessage(e.target.value);
+    
+    if (!activeGroup || !user || !wsRef.current) return;
+
+    // Send typing start
+    wsRef.current.send(JSON.stringify({
+      type: 'typing',
+      groupId: activeGroup.id,
+      userId: user.id,
+      username: user.username,
+      isTyping: true
+    }));
+
+    // Clear existing timeout
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+    // Set timeout to send typing stop
+    typingTimeoutRef.current = setTimeout(() => {
+      wsRef.current?.send(JSON.stringify({
+        type: 'typing',
+        groupId: activeGroup.id,
+        userId: user.id,
+        username: user.username,
+        isTyping: false
+      }));
+    }, 3000);
+  };
+
   const sendMessage = async () => {
     if (!newMessage || !activeGroup || !user || !wsRef.current) return;
     const groupKey = groupKeysRef.current.get(activeGroup.id);
@@ -362,10 +422,25 @@ export default function Messenger() {
       groupId: activeGroup.id,
       senderId: user.id,
       content: encrypted.content,
-      iv: encrypted.iv
+      iv: encrypted.iv,
+      replyToId: replyingTo?.id
     }));
 
     setNewMessage('');
+    setReplyingTo(null);
+    
+    // Clear typing status
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    wsRef.current.send(JSON.stringify({
+      type: 'typing',
+      groupId: activeGroup.id,
+      userId: user.id,
+      username: user.username,
+      isTyping: false
+    }));
   };
 
   const [showMembers, setShowMembers] = useState(false);
@@ -549,6 +624,55 @@ export default function Messenger() {
     setUndoLeave(null);
   };
 
+  const handleUpdateProfile = async () => {
+    if (!user || !profileUsername) return;
+    try {
+      const res = await fetch(`/api/users/${user.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: profileUsername })
+      });
+      if (res.ok) {
+        const updatedUser = { ...user, username: profileUsername };
+        setUser(updatedUser);
+        localStorage.setItem('gig_big_user', JSON.stringify(updatedUser));
+        setShowProfile(false);
+      }
+    } catch (e) {
+      console.error("Failed to update profile", e);
+    }
+  };
+
+  const handleRotateIdentity = async () => {
+    if (!user) return;
+    if (!confirm("WARNING: Rotating your identity will generate a new public/private key pair. You will NOT be able to read existing messages in your current groups until they are re-keyed for your new identity. Continue?")) return;
+
+    setIsRotating(true);
+    try {
+      const { publicKey, privateKey } = await generateIdentityKeyPair();
+      const pubKeyBase64 = await exportPublicKey(publicKey);
+      const privKeyBase64 = await exportIdentityPrivateKey(privateKey);
+
+      const res = await fetch(`/api/users/${user.id}/keys`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publicKey: pubKeyBase64 })
+      });
+
+      if (res.ok) {
+        privateKeyRef.current = privateKey;
+        const updatedUser = { ...user, publicKey: pubKeyBase64, privateKey: privKeyBase64 };
+        setUser(updatedUser);
+        localStorage.setItem('gig_big_user', JSON.stringify(updatedUser));
+        alert("Identity rotated successfully. You may need to be re-invited to groups to read new messages.");
+      }
+    } catch (e) {
+      console.error("Failed to rotate identity", e);
+    } finally {
+      setIsRotating(false);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('gig_big_user');
     setUser(null);
@@ -581,7 +705,20 @@ export default function Messenger() {
       if (groupKey) {
         try {
           const decrypted = await decryptMessage(m.content, m.iv, groupKey);
-          return { ...m, decryptedContent: decrypted };
+          let decryptedReply = undefined;
+          if (m.reply_to_content && m.reply_to_iv) {
+            try {
+              decryptedReply = await decryptMessage(m.reply_to_content, m.reply_to_iv, groupKey);
+            } catch (e) {
+              decryptedReply = "[Encrypted Reply]";
+            }
+          }
+          return { 
+            ...m, 
+            decryptedContent: decrypted, 
+            decryptedReplyContent: decryptedReply,
+            replyToSenderName: m.reply_to_sender_name 
+          };
         } catch (e) {
           return { ...m, decryptedContent: "[Decryption Failed]" };
         }
@@ -733,14 +870,29 @@ export default function Messenger() {
         </div>
 
         <div className="p-4 bg-gray-50 border-t border-black/5">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-white text-xs font-bold">
-              {user.username[0].toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold truncate">{user.username}</p>
-              <p className="text-[10px] text-gray-400 truncate font-mono">{user.id.slice(0, 8)}...</p>
-            </div>
+          <div className="flex items-center justify-between">
+            <button 
+              onClick={() => {
+                setProfileUsername(user.username);
+                setShowProfile(true);
+              }}
+              className="flex items-center gap-3 hover:bg-gray-100 p-1 rounded-lg transition-all flex-1 min-w-0"
+            >
+              <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0">
+                {user.username[0].toUpperCase()}
+              </div>
+              <div className="text-left min-w-0">
+                <p className="text-xs font-bold truncate">{user.username}</p>
+                <p className="text-[10px] text-gray-400 truncate font-mono">{user.id.slice(0, 8)}...</p>
+              </div>
+            </button>
+            <button 
+              onClick={handleLogout}
+              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+              title="Logout"
+            >
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
       </div>
@@ -784,6 +936,13 @@ export default function Messenger() {
                 >
                   <Link size={16} />
                 </button>
+                <button 
+                  onClick={handleLeaveGroup}
+                  className="p-1.5 bg-red-50 hover:bg-red-100 rounded-lg transition-colors text-red-600"
+                  title="Leave Group"
+                >
+                  <LogOut size={16} />
+                </button>
               </div>
             </div>
 
@@ -804,12 +963,29 @@ export default function Messenger() {
                         {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                     </div>
-                    <div className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm shadow-sm ${
+                    <div className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm shadow-sm relative group ${
                       msg.senderId === user.id 
                         ? 'bg-black text-white rounded-tr-none' 
                         : 'bg-white text-gray-800 rounded-tl-none border border-black/5'
                     }`}>
+                      {msg.decryptedReplyContent && (
+                        <div className={`mb-2 p-2 rounded-lg text-[10px] border-l-2 ${
+                          msg.senderId === user.id ? 'bg-white/10 border-white/30' : 'bg-gray-50 border-gray-300'
+                        }`}>
+                          <p className="font-bold mb-1">{msg.replyToSenderName}</p>
+                          <p className="opacity-70 truncate">{msg.decryptedReplyContent}</p>
+                        </div>
+                      )}
                       {msg.decryptedContent}
+                      
+                      <button 
+                        onClick={() => setReplyingTo(msg)}
+                        className={`absolute top-0 p-1.5 bg-white shadow-md rounded-full opacity-0 group-hover:opacity-100 transition-opacity ${
+                          msg.senderId === user.id ? '-left-10 text-black' : '-right-10 text-black'
+                        }`}
+                      >
+                        <Reply size={14} />
+                      </button>
                     </div>
                   </motion.div>
                 ))}
@@ -818,11 +994,45 @@ export default function Messenger() {
             </div>
 
             <div className="p-6 bg-white border-t border-black/5">
+              {replyingTo && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-4 p-3 bg-gray-50 border border-black/5 rounded-xl flex items-center justify-between"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Replying to {replyingTo.senderName}</p>
+                    <p className="text-xs text-gray-600 truncate">{replyingTo.decryptedContent}</p>
+                  </div>
+                  <button 
+                    onClick={() => setReplyingTo(null)}
+                    className="p-1 hover:bg-gray-200 rounded-full transition-colors text-gray-400"
+                  >
+                    <X size={16} />
+                  </button>
+                </motion.div>
+              )}
+              {activeGroup && typingUsers[activeGroup.id]?.length > 0 && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-2 text-[10px] text-emerald-600 font-medium flex items-center gap-2"
+                >
+                  <div className="flex gap-0.5">
+                    <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1, times: [0, 0.5, 1] }} className="w-1 h-1 bg-emerald-500 rounded-full" />
+                    <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2, times: [0, 0.5, 1] }} className="w-1 h-1 bg-emerald-500 rounded-full" />
+                    <motion.div animate={{ opacity: [0, 1, 0] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4, times: [0, 0.5, 1] }} className="w-1 h-1 bg-emerald-500 rounded-full" />
+                  </div>
+                  {typingUsers[activeGroup.id].length === 1 
+                    ? `${typingUsers[activeGroup.id][0]} is typing...`
+                    : `${typingUsers[activeGroup.id].length} people are typing...`}
+                </motion.div>
+              )}
               <div className="relative flex items-center">
                 <input
                   type="text"
                   value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
+                  onChange={handleTyping}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   placeholder="Type a message..."
                   className="w-full pl-4 pr-12 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all text-sm"
@@ -851,6 +1061,90 @@ export default function Messenger() {
 
       {/* Modals */}
       <AnimatePresence>
+        {showProfile && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-16 h-16 bg-emerald-500 rounded-2xl flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-emerald-200">
+                  {user.username[0].toUpperCase()}
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold tracking-tight">User Profile</h3>
+                  <p className="text-xs text-gray-400 font-mono">{user.id}</p>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Display Name</label>
+                  <input 
+                    type="text" 
+                    value={profileUsername}
+                    onChange={(e) => setProfileUsername(e.target.value)}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+                    placeholder="Your handle"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Public Identity Key</label>
+                  <div className="relative">
+                    <textarea 
+                      readOnly
+                      value={user.publicKey}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-[10px] font-mono h-24 focus:outline-none resize-none"
+                    />
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(user.publicKey);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }}
+                      className="absolute right-2 top-2 p-1.5 bg-white border border-black/5 rounded-lg hover:bg-gray-50 transition-colors text-gray-400"
+                    >
+                      {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[10px] text-gray-400 italic serif">
+                    This is your unique cryptographic identity. Others use this to encrypt messages for you.
+                  </p>
+                </div>
+
+                <div className="pt-4 border-t border-black/5 space-y-3">
+                  <button 
+                    onClick={handleRotateIdentity}
+                    disabled={isRotating}
+                    className="w-full py-3 bg-white border border-black/10 text-gray-700 rounded-xl font-bold hover:bg-gray-50 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <RefreshCw size={16} className={isRotating ? 'animate-spin' : ''} />
+                    {isRotating ? 'Rotating...' : 'Rotate Identity Keys'}
+                  </button>
+                  
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setShowProfile(false)}
+                      className="flex-1 py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={handleUpdateProfile}
+                      className="flex-1 py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {showCreateGroup && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <motion.div 
