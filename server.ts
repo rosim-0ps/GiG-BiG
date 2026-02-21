@@ -34,6 +34,8 @@ db.exec(`
     PRIMARY KEY (group_id, user_id)
   );
 
+  ALTER TABLE group_members ADD COLUMN last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP;
+
   CREATE TABLE IF NOT EXISTS group_invites (
     token TEXT PRIMARY KEY,
     group_id TEXT,
@@ -102,9 +104,10 @@ async function startServer() {
 
   app.get("/api/groups/:userId", (req, res) => {
     const groups = db.prepare(`
-      SELECT g.*, gm.encrypted_group_key,
+      SELECT g.*, gm.encrypted_group_key, gm.last_read_at,
              (SELECT content FROM messages WHERE group_id = g.id ORDER BY created_at DESC LIMIT 1) as last_message_content,
-             (SELECT iv FROM messages WHERE group_id = g.id ORDER BY created_at DESC LIMIT 1) as last_message_iv
+             (SELECT iv FROM messages WHERE group_id = g.id ORDER BY created_at DESC LIMIT 1) as last_message_iv,
+             (SELECT COUNT(*) FROM messages WHERE group_id = g.id AND created_at > gm.last_read_at) as unread_count
       FROM groups g 
       JOIN group_members gm ON g.id = gm.group_id 
       WHERE gm.user_id = ?
@@ -157,15 +160,23 @@ async function startServer() {
   });
 
   app.get("/api/invites/:token", (req, res) => {
-    const invite = db.prepare("SELECT i.*, g.name as group_name FROM group_invites i JOIN groups g ON i.group_id = g.id WHERE i.token = ?").get(req.params.token) as any;
-    if (!invite) return res.status(404).json({ error: "Invite not found" });
+    const invite = db.prepare(`
+      SELECT i.*, g.name as group_name 
+      FROM group_invites i 
+      JOIN groups g ON i.group_id = g.id 
+      WHERE i.token = ? AND (i.expires_at IS NULL OR i.expires_at > CURRENT_TIMESTAMP)
+    `).get(req.params.token) as any;
+    if (!invite) return res.status(404).json({ error: "Invite not found or expired" });
     res.json(invite);
   });
 
   app.post("/api/invites/:token/join", (req, res) => {
     const { userId, encryptedGroupKey } = req.body;
-    const invite = db.prepare("SELECT group_id FROM group_invites WHERE token = ?").get(req.params.token) as any;
-    if (!invite) return res.status(404).json({ error: "Invite not found" });
+    const invite = db.prepare(`
+      SELECT group_id FROM group_invites 
+      WHERE token = ? AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+    `).get(req.params.token) as any;
+    if (!invite) return res.status(404).json({ error: "Invite not found or expired" });
 
     try {
       db.prepare("INSERT INTO group_members (group_id, user_id, encrypted_group_key) VALUES (?, ?, ?)")
@@ -190,6 +201,13 @@ async function startServer() {
       LIMIT 100
     `).all(req.params.groupId);
     res.json(messages);
+  });
+
+  app.post("/api/groups/:groupId/read", (req, res) => {
+    const { userId } = req.body;
+    db.prepare("UPDATE group_members SET last_read_at = CURRENT_TIMESTAMP WHERE group_id = ? AND user_id = ?")
+      .run(req.params.groupId, userId);
+    res.json({ success: true });
   });
 
   // WebSocket logic

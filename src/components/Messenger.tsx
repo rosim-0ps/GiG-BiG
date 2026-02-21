@@ -18,6 +18,8 @@ import {
 import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Logo from './Logo';
+import AnimatedLock from './AnimatedLock';
+import TypewriterText from './TypewriterText';
 
 interface User {
   id: string;
@@ -32,6 +34,7 @@ interface Group {
   last_message_content?: string;
   last_message_iv?: string;
   last_message_decrypted?: string;
+  unread_count: number;
 }
 
 interface Message {
@@ -62,12 +65,20 @@ export default function Messenger() {
   const [inviteLink, setInviteLink] = useState('');
   const [copied, setCopied] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showInviteConfig, setShowInviteConfig] = useState(false);
+  const [inviteExpiration, setInviteExpiration] = useState('1h');
   const [pendingInvite, setPendingInvite] = useState<{ token: string, secret: string, groupName: string } | null>(null);
+  const [undoLeave, setUndoLeave] = useState<{ groupId: string, groupName: string, timer: any } | null>(null);
   
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeGroupRef = useRef<Group | null>(null);
+
+  useEffect(() => {
+    activeGroupRef.current = activeGroup;
+  }, [activeGroup]);
 
   // On mount, check for existing user and pending invites
   useEffect(() => {
@@ -125,14 +136,29 @@ export default function Messenger() {
           if (groupKey) {
             try {
               const decrypted = await decryptMessage(data.content, data.iv, groupKey);
-              setMessages(prev => [...prev, { ...data, decryptedContent: decrypted }]);
               
-              // Update last message in groups list
-              setGroups(prev => prev.map(g => 
-                g.id === data.groupId 
-                  ? { ...g, last_message_decrypted: decrypted } 
-                  : g
-              ));
+              // If this is the active group, add to messages
+              if (activeGroupRef.current?.id === data.groupId) {
+                setMessages(prev => [...prev, { ...data, decryptedContent: decrypted }]);
+                // Mark as read on server
+                fetch(`/api/groups/${data.groupId}/read`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ userId: user.id })
+                });
+              }
+              
+              // Update groups list (last message and unread count)
+              setGroups(prev => prev.map(g => {
+                if (g.id === data.groupId) {
+                  return { 
+                    ...g, 
+                    last_message_decrypted: decrypted,
+                    unread_count: activeGroupRef.current?.id === data.groupId ? 0 : (g.unread_count || 0) + 1
+                  };
+                }
+                return g;
+              }));
             } catch (e) {
               console.error("Failed to decrypt message", e);
             }
@@ -188,12 +214,12 @@ export default function Messenger() {
             }
           }
           
-          return { ...group, last_message_decrypted: decryptedSnippet };
+          return { ...group, last_message_decrypted: decryptedSnippet, unread_count: group.unread_count || 0 };
         } catch (e) {
           console.error("Failed to decrypt group key", e);
         }
       }
-      return group;
+      return { ...group, unread_count: group.unread_count || 0 };
     }));
 
     setGroups(processedGroups);
@@ -395,16 +421,27 @@ export default function Messenger() {
     const secret = btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(16))));
     const encrypted = await encryptGroupKeyWithSecret(groupKey, secret);
 
+    let expiresAt: string | null = null;
+    if (inviteExpiration !== 'never') {
+      const now = new Date();
+      if (inviteExpiration === '1h') now.setHours(now.getHours() + 1);
+      else if (inviteExpiration === '1d') now.setDate(now.getDate() + 1);
+      else if (inviteExpiration === '7d') now.setDate(now.getDate() + 7);
+      expiresAt = now.toISOString().replace('T', ' ').split('.')[0]; // SQLite format
+    }
+
     const res = await fetch(`/api/groups/${activeGroup.id}/invites`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        encryptedGroupKey: JSON.stringify(encrypted)
+        encryptedGroupKey: JSON.stringify(encrypted),
+        expiresAt
       }),
     });
     const { token } = await res.json();
     const link = `${window.location.origin}${window.location.pathname}?invite=${token}#${secret}`;
     setInviteLink(link);
+    setShowInviteConfig(false);
     setShowInviteModal(true);
   };
 
@@ -445,49 +482,71 @@ export default function Messenger() {
   const handleLeaveGroup = async () => {
     if (!activeGroup || !user) return;
     
-    const confirmLeave = confirm("Are you sure you want to leave this group? The group will be re-keyed for remaining members.");
-    if (!confirmLeave) return;
-
-    try {
-      // 1. Re-key for remaining members before leaving
-      const newGroupKey = await generateGroupKey();
-      const remainingMembers = groupMembers.filter(m => m.user_id !== user.id);
-      
-      if (remainingMembers.length > 0) {
-        const memberKeys = await Promise.all(remainingMembers.map(async (m) => {
-          const pubKey = await importPublicKey(m.public_key);
-          const encKey = await encryptGroupKey(newGroupKey, pubKey);
-          return { userId: m.user_id, encryptedGroupKey: encKey };
-        }));
-
-        await fetch(`/api/groups/${activeGroup.id}/rekey`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ memberKeys }),
-        });
-
-        // Notify others via WS
-        wsRef.current?.send(JSON.stringify({
-          type: 'chat',
-          groupId: activeGroup.id,
-          senderId: user.id,
-          content: btoa(String.fromCharCode(...new TextEncoder().encode(`SYSTEM: ${user.username} has left the group. Group re-keyed.`))),
-          iv: btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(12))))
-        }));
-      }
-
-      // 2. Remove self from DB
-      await fetch(`/api/groups/${activeGroup.id}/members/${user.id}`, { method: 'DELETE' });
-
-      // 3. Update local state
-      setGroups(prev => prev.filter(g => g.id !== activeGroup.id));
-      setActiveGroup(null);
-      setShowMembers(false);
-      groupKeysRef.current.delete(activeGroup.id);
-    } catch (e) {
-      console.error("Failed to leave group", e);
-      alert("Failed to leave group securely.");
+    // Clear any existing undo timer
+    if (undoLeave) {
+      clearTimeout(undoLeave.timer);
     }
+
+    const groupId = activeGroup.id;
+    const groupName = activeGroup.name;
+
+    // 1. Optimistically remove from UI
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+    setActiveGroup(null);
+    setShowMembers(false);
+
+    // 2. Set up undo timer
+    const timer = setTimeout(async () => {
+      try {
+        // Fetch latest members to re-key correctly
+        const membersRes = await fetch(`/api/groups/${groupId}/members`);
+        const latestMembers = await membersRes.json();
+        
+        // Re-key for remaining members
+        const newGroupKey = await generateGroupKey();
+        const remainingMembers = latestMembers.filter((m: any) => m.user_id !== user.id);
+        
+        if (remainingMembers.length > 0) {
+          const memberKeys = await Promise.all(remainingMembers.map(async (m: any) => {
+            const pubKey = await importPublicKey(m.public_key);
+            const encKey = await encryptGroupKey(newGroupKey, pubKey);
+            return { userId: m.user_id, encryptedGroupKey: encKey };
+          }));
+
+          await fetch(`/api/groups/${groupId}/rekey`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ memberKeys }),
+          });
+
+          wsRef.current?.send(JSON.stringify({
+            type: 'chat',
+            groupId: groupId,
+            senderId: user.id,
+            content: btoa(String.fromCharCode(...new TextEncoder().encode(`SYSTEM: ${user.username} has left the group. Group re-keyed.`))),
+            iv: btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(12))))
+          }));
+        }
+
+        // Remove self from DB
+        await fetch(`/api/groups/${groupId}/members/${user.id}`, { method: 'DELETE' });
+        groupKeysRef.current.delete(groupId);
+        setUndoLeave(null);
+      } catch (e) {
+        console.error("Delayed leave failed", e);
+      }
+    }, 5000);
+
+    setUndoLeave({ groupId, groupName, timer });
+  };
+
+  const handleUndoLeave = () => {
+    if (!undoLeave || !user) return;
+    clearTimeout(undoLeave.timer);
+    
+    // Restore group to list
+    fetchGroups(user.id);
+    setUndoLeave(null);
   };
 
   const handleLogout = () => {
@@ -503,6 +562,17 @@ export default function Messenger() {
   const selectGroup = async (group: Group) => {
     setActiveGroup(group);
     fetchGroupMembers(group.id);
+    
+    // Mark as read
+    if (user) {
+      fetch(`/api/groups/${group.id}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id })
+      });
+      setGroups(prev => prev.map(g => g.id === group.id ? { ...g, unread_count: 0 } : g));
+    }
+
     const res = await fetch(`/api/groups/${group.id}/messages`);
     const data = await res.json();
     
@@ -551,13 +621,13 @@ export default function Messenger() {
             </div>
             <button 
               onClick={handleRegister}
-              className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-3"
             >
-              Initialize Identity <Lock size={18} />
+              <TypewriterText text="Initialize Identity" /> <AnimatedLock />
             </button>
           </div>
           <p className="mt-6 text-[10px] text-gray-400 text-center uppercase tracking-widest leading-relaxed">
-            End-to-End Encrypted • Peer-to-Peer Key Exchange • Zero-Knowledge Storage
+            GiG Messaging Network
           </p>
         </motion.div>
       </div>
@@ -634,13 +704,25 @@ export default function Messenger() {
                 <Users size={18} />
               </div>
               <div className="text-left flex-1 min-w-0">
-                <p className="font-semibold text-sm truncate">{group.name}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className={`font-semibold text-sm truncate ${
+                    activeGroup?.id === group.id ? 'text-white' : (group.unread_count > 0 ? 'text-black' : 'text-gray-700')
+                  }`}>{group.name}</p>
+                  {group.unread_count > 0 && activeGroup?.id !== group.id && (
+                    <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shrink-0" />
+                  )}
+                </div>
                 <div className="flex items-center justify-between">
                   <p className={`text-[10px] truncate flex-1 ${
                     activeGroup?.id === group.id ? 'text-white/70' : 'text-gray-400'
                   }`}>
                     {group.last_message_decrypted || "No messages yet"}
                   </p>
+                  {group.unread_count > 0 && (
+                    <span className="ml-2 px-1.5 py-0.5 bg-emerald-500 text-white text-[9px] font-bold rounded-full min-w-[18px] text-center">
+                      {group.unread_count}
+                    </span>
+                  )}
                   <p className={`text-[9px] uppercase tracking-tighter ml-2 shrink-0 ${
                     activeGroup?.id === group.id ? 'text-white/40' : 'text-gray-300'
                   }`}>E2EE</p>
@@ -696,7 +778,7 @@ export default function Messenger() {
                   <UserPlus size={14} /> Add
                 </button>
                 <button 
-                  onClick={handleGenerateInvite}
+                  onClick={() => setShowInviteConfig(true)}
                   className="p-1.5 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors text-gray-600"
                   title="Generate Invite Link"
                 >
@@ -742,7 +824,7 @@ export default function Messenger() {
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  placeholder="Type an encrypted message..."
+                  placeholder="Type a message..."
                   className="w-full pl-4 pr-12 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all text-sm"
                 />
                 <button 
@@ -759,9 +841,9 @@ export default function Messenger() {
             <div className="w-20 h-20 bg-gray-100 rounded-3xl flex items-center justify-center mb-6">
               <MessageSquare className="text-gray-300 w-10 h-10" />
             </div>
-            <h3 className="text-xl font-bold tracking-tight mb-2">Select a secure channel</h3>
+            <h3 className="text-xl font-bold tracking-tight mb-2">Select a channel</h3>
             <p className="text-gray-400 text-sm max-w-xs serif italic">
-              All communications are encrypted locally before transmission. No plaintext ever touches our servers.
+              Start a conversation with your contacts.
             </p>
           </div>
         )}
@@ -957,7 +1039,7 @@ export default function Messenger() {
                   </button>
                 )) : (
                   <p className="text-center text-gray-400 py-8 italic serif">
-                    {userSearchQuery ? "No matching users found." : "Search for a user to start a secure DM."}
+                    {userSearchQuery ? "No matching users found." : "Search for a user to start a DM."}
                   </p>
                 )}
               </div>
@@ -974,6 +1056,63 @@ export default function Messenger() {
           </div>
         )}
 
+        {showInviteConfig && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full"
+            >
+              <h3 className="text-xl font-bold mb-4 tracking-tight">Invite Settings</h3>
+              <p className="text-sm text-gray-500 mb-6 italic serif">
+                Choose how long the invite link should remain valid.
+              </p>
+              
+              <div className="space-y-4 mb-8">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Expiration</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: '1h', label: '1 Hour' },
+                      { id: '1d', label: '1 Day' },
+                      { id: '7d', label: '7 Days' },
+                      { id: 'never', label: 'Never' }
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setInviteExpiration(opt.id)}
+                        className={`py-2 px-3 rounded-xl text-xs font-bold transition-all border ${
+                          inviteExpiration === opt.id 
+                            ? 'bg-black text-white border-black' 
+                            : 'bg-gray-50 text-gray-600 border-black/5 hover:bg-gray-100'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setShowInviteConfig(false)}
+                  className="flex-1 py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleGenerateInvite}
+                  className="flex-1 py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors"
+                >
+                  Generate
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {showInviteModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <motion.div 
@@ -984,7 +1123,7 @@ export default function Messenger() {
             >
               <h3 className="text-xl font-bold mb-4 tracking-tight">Group Invite Link</h3>
               <p className="text-sm text-gray-500 mb-6 italic serif">
-                Anyone with this link can join the group and access the shared encryption key. Share it securely.
+                Anyone with this link can join the group. Share it with people you want to invite.
               </p>
               
               <div className="flex items-center gap-2 p-3 bg-gray-50 border border-black/5 rounded-xl mb-6">
@@ -1049,6 +1188,27 @@ export default function Messenger() {
                   Join Group
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+        {undoLeave && (
+          <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50">
+            <motion.div 
+              initial={{ y: 100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 100, opacity: 0 }}
+              className="bg-black text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-6 min-w-[320px] justify-between"
+            >
+              <div className="flex items-center gap-3">
+                <Users size={20} className="text-emerald-400" />
+                <p className="text-sm font-medium">Left <span className="font-bold">{undoLeave.groupName}</span></p>
+              </div>
+              <button 
+                onClick={handleUndoLeave}
+                className="text-emerald-400 font-black text-xs uppercase tracking-widest hover:text-emerald-300 transition-colors px-3 py-1 border border-emerald-400/30 rounded-lg"
+              >
+                Undo
+              </button>
             </motion.div>
           </div>
         )}
