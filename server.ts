@@ -102,7 +102,9 @@ async function startServer() {
 
   app.get("/api/groups/:userId", (req, res) => {
     const groups = db.prepare(`
-      SELECT g.*, gm.encrypted_group_key 
+      SELECT g.*, gm.encrypted_group_key,
+             (SELECT content FROM messages WHERE group_id = g.id ORDER BY created_at DESC LIMIT 1) as last_message_content,
+             (SELECT iv FROM messages WHERE group_id = g.id ORDER BY created_at DESC LIMIT 1) as last_message_iv
       FROM groups g 
       JOIN group_members gm ON g.id = gm.group_id 
       WHERE gm.user_id = ?

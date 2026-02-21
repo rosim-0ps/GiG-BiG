@@ -17,6 +17,7 @@ import {
 } from '../lib/crypto';
 import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import Logo from './Logo';
 
 interface User {
   id: string;
@@ -28,6 +29,9 @@ interface Group {
   id: string;
   name: string;
   encrypted_group_key: string;
+  last_message_content?: string;
+  last_message_iv?: string;
+  last_message_decrypted?: string;
 }
 
 interface Message {
@@ -122,6 +126,13 @@ export default function Messenger() {
             try {
               const decrypted = await decryptMessage(data.content, data.iv, groupKey);
               setMessages(prev => [...prev, { ...data, decryptedContent: decrypted }]);
+              
+              // Update last message in groups list
+              setGroups(prev => prev.map(g => 
+                g.id === data.groupId 
+                  ? { ...g, last_message_decrypted: decrypted } 
+                  : g
+              ));
             } catch (e) {
               console.error("Failed to decrypt message", e);
             }
@@ -160,15 +171,32 @@ export default function Messenger() {
   const fetchGroups = async (userId: string) => {
     const res = await fetch(`/api/groups/${userId}`);
     const data = await res.json();
-    setGroups(data);
     
-    // Decrypt group keys
-    for (const group of data) {
+    // Decrypt group keys and last messages
+    const processedGroups = await Promise.all(data.map(async (group: Group) => {
       if (privateKeyRef.current) {
-        const key = await decryptGroupKey(group.encrypted_group_key, privateKeyRef.current);
-        groupKeysRef.current.set(group.id, key);
+        try {
+          const key = await decryptGroupKey(group.encrypted_group_key, privateKeyRef.current);
+          groupKeysRef.current.set(group.id, key);
+          
+          let decryptedSnippet = undefined;
+          if (group.last_message_content && group.last_message_iv) {
+            try {
+              decryptedSnippet = await decryptMessage(group.last_message_content, group.last_message_iv, key);
+            } catch (e) {
+              decryptedSnippet = "[Encrypted]";
+            }
+          }
+          
+          return { ...group, last_message_decrypted: decryptedSnippet };
+        } catch (e) {
+          console.error("Failed to decrypt group key", e);
+        }
       }
-    }
+      return group;
+    }));
+
+    setGroups(processedGroups);
   };
 
   const fetchAllUsers = async (currentUserId?: string) => {
@@ -414,6 +442,54 @@ export default function Messenger() {
     }
   };
 
+  const handleLeaveGroup = async () => {
+    if (!activeGroup || !user) return;
+    
+    const confirmLeave = confirm("Are you sure you want to leave this group? The group will be re-keyed for remaining members.");
+    if (!confirmLeave) return;
+
+    try {
+      // 1. Re-key for remaining members before leaving
+      const newGroupKey = await generateGroupKey();
+      const remainingMembers = groupMembers.filter(m => m.user_id !== user.id);
+      
+      if (remainingMembers.length > 0) {
+        const memberKeys = await Promise.all(remainingMembers.map(async (m) => {
+          const pubKey = await importPublicKey(m.public_key);
+          const encKey = await encryptGroupKey(newGroupKey, pubKey);
+          return { userId: m.user_id, encryptedGroupKey: encKey };
+        }));
+
+        await fetch(`/api/groups/${activeGroup.id}/rekey`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ memberKeys }),
+        });
+
+        // Notify others via WS
+        wsRef.current?.send(JSON.stringify({
+          type: 'chat',
+          groupId: activeGroup.id,
+          senderId: user.id,
+          content: btoa(String.fromCharCode(...new TextEncoder().encode(`SYSTEM: ${user.username} has left the group. Group re-keyed.`))),
+          iv: btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(12))))
+        }));
+      }
+
+      // 2. Remove self from DB
+      await fetch(`/api/groups/${activeGroup.id}/members/${user.id}`, { method: 'DELETE' });
+
+      // 3. Update local state
+      setGroups(prev => prev.filter(g => g.id !== activeGroup.id));
+      setActiveGroup(null);
+      setShowMembers(false);
+      groupKeysRef.current.delete(activeGroup.id);
+    } catch (e) {
+      console.error("Failed to leave group", e);
+      alert("Failed to leave group securely.");
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('gig_big_user');
     setUser(null);
@@ -455,11 +531,11 @@ export default function Messenger() {
           className="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl border border-black/5"
         >
           <div className="flex justify-center mb-6">
-            <div className="w-16 h-16 bg-black rounded-2xl flex items-center justify-center">
-              <Shield className="text-white w-8 h-8" />
+            <div className="w-20 h-20 bg-black rounded-3xl flex items-center justify-center shadow-2xl shadow-black/20">
+              <Logo className="text-white" size="lg" />
             </div>
           </div>
-          <h1 className="text-3xl font-bold text-center mb-2 tracking-tight">GiG BiG</h1>
+          <h1 className="text-3xl font-bold text-center mb-2 tracking-tight">GiG</h1>
           <p className="text-center text-gray-500 mb-8 italic serif">Trust Your Message.</p>
           
           <div className="space-y-4">
@@ -494,11 +570,11 @@ export default function Messenger() {
       <div className="w-full md:w-80 bg-white border-r border-black/10 flex flex-col">
         <div className="p-6 border-bottom border-black/5 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center">
-              <Shield className="text-white w-5 h-5" />
+            <div className="w-12 h-12 bg-black rounded-xl flex items-center justify-center shadow-lg shadow-black/10">
+              <Logo className="text-white" size="sm" />
             </div>
             <div>
-              <h2 className="font-bold tracking-tight">GiG BiG</h2>
+              <h2 className="font-bold tracking-tight text-lg">GiG</h2>
               <p className="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">Secure Session</p>
             </div>
           </div>
@@ -557,11 +633,18 @@ export default function Messenger() {
               }`}>
                 <Users size={18} />
               </div>
-              <div className="text-left">
+              <div className="text-left flex-1 min-w-0">
                 <p className="font-semibold text-sm truncate">{group.name}</p>
-                <p className={`text-[10px] uppercase tracking-tighter ${
-                  activeGroup?.id === group.id ? 'text-white/50' : 'text-gray-400'
-                }`}>E2EE Active</p>
+                <div className="flex items-center justify-between">
+                  <p className={`text-[10px] truncate flex-1 ${
+                    activeGroup?.id === group.id ? 'text-white/70' : 'text-gray-400'
+                  }`}>
+                    {group.last_message_decrypted || "No messages yet"}
+                  </p>
+                  <p className={`text-[9px] uppercase tracking-tighter ml-2 shrink-0 ${
+                    activeGroup?.id === group.id ? 'text-white/40' : 'text-gray-300'
+                  }`}>E2EE</p>
+                </div>
               </div>
             </button>
           ))}
@@ -761,12 +844,20 @@ export default function Messenger() {
                   </div>
                 ))}
               </div>
-              <button 
-                onClick={() => setShowMembers(false)}
-                className="w-full py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors"
-              >
-                Close
-              </button>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setShowMembers(false)}
+                  className="flex-1 py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors"
+                >
+                  Close
+                </button>
+                <button 
+                  onClick={handleLeaveGroup}
+                  className="flex-1 py-3 bg-red-50 text-red-600 rounded-xl font-bold hover:bg-red-100 transition-colors flex items-center justify-center gap-2"
+                >
+                  Leave Group <LogOut size={18} />
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
