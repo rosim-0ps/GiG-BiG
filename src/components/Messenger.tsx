@@ -13,7 +13,8 @@ import {
   exportIdentityPrivateKey,
   importIdentityPrivateKey,
   encryptGroupKeyWithSecret,
-  decryptGroupKeyWithSecret
+  decryptGroupKeyWithSecret,
+  uint8ArrayToBase64
 } from '../lib/crypto';
 import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check, Reply, X, Settings, User as UserIcon, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -479,12 +480,14 @@ export default function Messenger() {
     fetchGroupMembers(activeGroup.id);
     
     // Notify others via WS (optional, but good for real-time re-keying)
+    const systemMsg = "SYSTEM: Group has been re-keyed for security.";
+    const encryptedSystemMsg = await encryptMessage(systemMsg, newGroupKey);
     wsRef.current?.send(JSON.stringify({
       type: 'chat',
       groupId: activeGroup.id,
       senderId: user.id,
-      content: btoa(String.fromCharCode(...new TextEncoder().encode("SYSTEM: Group has been re-keyed for security."))),
-      iv: btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(12))))
+      content: encryptedSystemMsg.content,
+      iv: encryptedSystemMsg.iv
     }));
   };
 
@@ -493,7 +496,7 @@ export default function Messenger() {
     const groupKey = groupKeysRef.current.get(activeGroup.id);
     if (!groupKey) return;
 
-    const secret = btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(16))));
+    const secret = uint8ArrayToBase64(window.crypto.getRandomValues(new Uint8Array(16)));
     const encrypted = await encryptGroupKeyWithSecret(groupKey, secret);
 
     let expiresAt: string | null = null;
@@ -594,12 +597,15 @@ export default function Messenger() {
             body: JSON.stringify({ memberKeys }),
           });
 
+          const systemMsg = `SYSTEM: ${user.username} has left the group. Group re-keyed.`;
+          const encryptedSystemMsg = await encryptMessage(systemMsg, newGroupKey);
+
           wsRef.current?.send(JSON.stringify({
             type: 'chat',
             groupId: groupId,
             senderId: user.id,
-            content: btoa(String.fromCharCode(...new TextEncoder().encode(`SYSTEM: ${user.username} has left the group. Group re-keyed.`))),
-            iv: btoa(String.fromCharCode(...window.crypto.getRandomValues(new Uint8Array(12))))
+            content: encryptedSystemMsg.content,
+            iv: encryptedSystemMsg.iv
           }));
         }
 
