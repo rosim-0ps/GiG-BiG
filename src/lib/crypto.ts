@@ -224,6 +224,66 @@ export async function encryptGroupKeyWithSecret(groupKey: CryptoKey, secret: str
   };
 }
 
+export async function encryptPrivateKeyWithPassword(privateKey: CryptoKey, password: string) {
+  const pkcs8Key = await window.crypto.subtle.exportKey("pkcs8", privateKey);
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  
+  const encoder = new TextEncoder();
+  const secretData = encoder.encode(password);
+  const hash = await window.crypto.subtle.digest("SHA-256", secretData);
+  const aesKey = await window.crypto.subtle.importKey(
+    "raw",
+    hash,
+    "AES-GCM",
+    false,
+    ["encrypt"]
+  );
+
+  const encrypted = await window.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    aesKey,
+    pkcs8Key
+  );
+
+  return {
+    encryptedKey: uint8ArrayToBase64(new Uint8Array(encrypted)),
+    iv: uint8ArrayToBase64(new Uint8Array(iv))
+  };
+}
+
+export async function decryptPrivateKeyWithPassword(encryptedKeyBase64: string, ivBase64: string, password: string) {
+  const iv = base64ToUint8Array(ivBase64);
+  const data = base64ToUint8Array(encryptedKeyBase64);
+  
+  const encoder = new TextEncoder();
+  const secretData = encoder.encode(password);
+  const hash = await window.crypto.subtle.digest("SHA-256", secretData);
+  const aesKey = await window.crypto.subtle.importKey(
+    "raw",
+    hash,
+    "AES-GCM",
+    false,
+    ["decrypt"]
+  );
+
+  const decrypted = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    aesKey,
+    data
+  );
+
+  return await window.crypto.subtle.importKey(
+    "pkcs8",
+    decrypted,
+    {
+      name: "ECDH",
+      namedCurve: "P-256",
+    },
+    true,
+    ["deriveKey", "deriveBits"]
+  );
+}
+
 export async function decryptGroupKeyWithSecret(encryptedKeyBase64: string, ivBase64: string, secret: string) {
   const iv = base64ToUint8Array(ivBase64);
   const data = base64ToUint8Array(encryptedKeyBase64);

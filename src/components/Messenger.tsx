@@ -14,6 +14,8 @@ import {
   importIdentityPrivateKey,
   encryptGroupKeyWithSecret,
   decryptGroupKeyWithSecret,
+  encryptPrivateKeyWithPassword,
+  decryptPrivateKeyWithPassword,
   uint8ArrayToBase64
 } from '../lib/crypto';
 import { Shield, Users, MessageSquare, Send, Plus, Lock, UserPlus, LogOut, Link, Copy, Check, Reply, X, Settings, User as UserIcon, RefreshCw } from 'lucide-react';
@@ -81,6 +83,12 @@ export default function Messenger() {
   const [profileUsername, setProfileUsername] = useState('');
   const [isRotating, setIsRotating] = useState(false);
   const [registerError, setRegisterError] = useState('');
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'verify'>('login');
+  const [verificationToken, setVerificationToken] = useState('');
+  const [verificationMessage, setVerificationMessage] = useState('');
   
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
@@ -98,6 +106,12 @@ export default function Messenger() {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('invite');
     const secret = window.location.hash.slice(1);
+    const vToken = params.get('verify');
+
+    if (vToken) {
+      setAuthMode('verify');
+      setVerificationToken(vToken);
+    }
 
     if (token && secret) {
       fetch(`/api/invites/${token}`)
@@ -205,16 +219,13 @@ export default function Messenger() {
   }, [user]);
 
   const handleRegister = async () => {
-    if (!usernameInput) return;
+    if (!usernameInput || !emailInput) return;
     setRegisterError('');
-    const keyPair = await generateIdentityKeyPair();
-    privateKeyRef.current = keyPair.privateKey;
-    const publicKey = await exportPublicKey(keyPair.publicKey);
 
     const res = await fetch('/api/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: usernameInput, publicKey }),
+      body: JSON.stringify({ username: usernameInput, email: emailInput }),
     });
     
     if (!res.ok) {
@@ -223,16 +234,87 @@ export default function Messenger() {
       return;
     }
     
-    const userData = await res.json();
-    setUser(userData);
-    localStorage.setItem('gig_big_user', JSON.stringify({ 
-      ...userData, 
-      privateKey: await exportIdentityPrivateKey(keyPair.privateKey) 
-    }));
+    const data = await res.json();
+    setVerificationMessage(`Verification link generated. In a real app, this would be emailed to ${data.email}. Click the link below to verify.`);
+    setVerificationToken(data.verification_token);
+  };
+
+  const handleVerify = async () => {
+    if (!passwordInput || passwordInput !== confirmPasswordInput) {
+      setRegisterError("Passwords do not match");
+      return;
+    }
+    setRegisterError('');
+
+    const keyPair = await generateIdentityKeyPair();
+    privateKeyRef.current = keyPair.privateKey;
+    const publicKey = await exportPublicKey(keyPair.publicKey);
     
-    // Fetch initial data
-    fetchGroups(userData.id);
-    fetchAllUsers(userData.id);
+    const encryptedPrivKey = await encryptPrivateKeyWithPassword(keyPair.privateKey, passwordInput);
+
+    const res = await fetch('/api/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        token: verificationToken, 
+        password: passwordInput,
+        publicKey,
+        encryptedPrivateKey: encryptedPrivKey.encryptedKey,
+        privateKeyIv: encryptedPrivKey.iv
+      }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json();
+      setRegisterError(errorData.error || 'Verification failed');
+      return;
+    }
+
+    setAuthMode('login');
+    setVerificationMessage('Account verified successfully. Please log in.');
+    setVerificationToken('');
+    setPasswordInput('');
+    setConfirmPasswordInput('');
+    
+    // Remove verify token from URL
+    const url = new URL(window.location.href);
+    url.searchParams.delete('verify');
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const handleLogin = async () => {
+    if (!usernameInput || !passwordInput) return;
+    setRegisterError('');
+
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: usernameInput, password: passwordInput }),
+    });
+
+    if (!res.ok) {
+      const errorData = await res.json();
+      setRegisterError(errorData.error || 'Login failed');
+      return;
+    }
+
+    const userData = await res.json();
+    
+    try {
+      const privateKey = await decryptPrivateKeyWithPassword(userData.encrypted_private_key, userData.private_key_iv, passwordInput);
+      privateKeyRef.current = privateKey;
+      
+      setUser(userData);
+      localStorage.setItem('gig_big_user', JSON.stringify({ 
+        ...userData, 
+        privateKey: await exportIdentityPrivateKey(privateKey) 
+      }));
+      
+      fetchGroups(userData.id);
+      fetchAllUsers(userData.id);
+    } catch (e) {
+      setRegisterError('Failed to decrypt identity. Incorrect password?');
+    }
   };
 
   const fetchGroups = async (userId: string) => {

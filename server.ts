@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import { fileURLToPath } from "url";
+import bcrypt from "bcryptjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const db = new Database("messaging.db");
@@ -25,7 +26,16 @@ db.exec(`
     created_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+`);
 
+try { db.exec("ALTER TABLE users ADD COLUMN email TEXT"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN password_hash TEXT"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN verification_token TEXT"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN encrypted_private_key TEXT"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN private_key_iv TEXT"); } catch (e) {}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT,
     user_id TEXT,
@@ -68,20 +78,68 @@ async function startServer() {
 
   // API Routes
   app.post("/api/register", (req, res) => {
-    const { username, publicKey } = req.body;
+    const { username, email } = req.body;
     
     const existingUser = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
     if (existingUser) {
-      return res.status(409).json({ error: "Username is already taken" });
+      return res.status(409).json({ error: "try new name and unique" });
     }
 
     try {
       const id = uuidv4();
-      db.prepare("INSERT INTO users (id, username, public_key) VALUES (?, ?, ?)").run(id, username, publicKey);
-      res.json({ id, username, publicKey });
+      const token = uuidv4();
+      db.prepare("INSERT INTO users (id, username, email, verification_token, is_verified) VALUES (?, ?, ?, ?, 0)").run(id, username, email, token);
+      // In a real app, send an email here. For now, we return the token to simulate the email link.
+      res.json({ id, username, email, verification_token: token });
     } catch (e) {
       res.status(400).json({ error: "Registration failed" });
     }
+  });
+
+  app.post("/api/verify", async (req, res) => {
+    const { token, password, publicKey, encryptedPrivateKey, privateKeyIv } = req.body;
+    
+    const user = db.prepare("SELECT * FROM users WHERE verification_token = ? AND is_verified = 0").get(token) as any;
+    if (!user) {
+      return res.status(400).json({ error: "Invalid or expired verification token" });
+    }
+
+    try {
+      const salt = await bcrypt.genSalt(10);
+      const passwordHash = await bcrypt.hash(password, salt);
+
+      db.prepare(`
+        UPDATE users 
+        SET is_verified = 1, password_hash = ?, public_key = ?, encrypted_private_key = ?, private_key_iv = ?, verification_token = NULL 
+        WHERE id = ?
+      `).run(passwordHash, publicKey, encryptedPrivateKey, privateKeyIv, user.id);
+
+      res.json({ id: user.id, username: user.username, public_key: publicKey, encrypted_private_key: encryptedPrivateKey, private_key_iv: privateKeyIv });
+    } catch (e) {
+      res.status(400).json({ error: "Verification failed" });
+    }
+  });
+
+  app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body;
+    
+    const user = db.prepare("SELECT * FROM users WHERE username = ? AND is_verified = 1").get(username) as any;
+    if (!user) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    res.json({ 
+      id: user.id, 
+      username: user.username, 
+      public_key: user.public_key,
+      encrypted_private_key: user.encrypted_private_key,
+      private_key_iv: user.private_key_iv
+    });
   });
 
   app.get("/api/users", (req, res) => {
