@@ -842,29 +842,141 @@ export default function Messenger() {
           <h1 className="text-3xl font-bold text-center mb-2 tracking-tight">GiG</h1>
           <p className="text-center text-gray-500 mb-8 italic serif">Trust Your Message.</p>
           
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Username</label>
-              <input 
-                type="text" 
-                value={usernameInput}
-                onChange={(e) => {
-                  setUsernameInput(e.target.value);
-                  setRegisterError('');
-                }}
-                className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
-                placeholder="Enter your handle..."
-              />
-              {registerError && (
-                <p className="text-red-500 text-xs mt-2">{registerError}</p>
-              )}
+          {verificationMessage && (
+            <div className="mb-6 p-4 bg-emerald-50 text-emerald-700 rounded-xl text-sm border border-emerald-100">
+              {verificationMessage}
             </div>
-            <button 
-              onClick={handleRegister}
-              className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-3"
-            >
-              <TypewriterText text="Initialize Identity" /> <AnimatedLock />
-            </button>
+          )}
+
+          <div className="space-y-4">
+            {authMode === 'register' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Username</label>
+                  <input 
+                    type="text" 
+                    value={usernameInput}
+                    onChange={(e) => {
+                      setUsernameInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Enter your handle..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Email</label>
+                  <input 
+                    type="email" 
+                    value={emailInput}
+                    onChange={(e) => {
+                      setEmailInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Enter your email..."
+                  />
+                </div>
+                {registerError && (
+                  <p className="text-red-500 text-xs mt-2">{registerError}</p>
+                )}
+                <button 
+                  onClick={handleRegister}
+                  className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-3"
+                >
+                  <TypewriterText text="Register" /> <AnimatedLock />
+                </button>
+                <p className="text-center text-sm text-gray-500 mt-4">
+                  Already have an account? <button onClick={() => setAuthMode('login')} className="text-black font-semibold underline">Log in</button>
+                </p>
+              </>
+            )}
+
+            {authMode === 'login' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Username</label>
+                  <input 
+                    type="text" 
+                    value={usernameInput}
+                    onChange={(e) => {
+                      setUsernameInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Enter your handle..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Password</label>
+                  <input 
+                    type="password" 
+                    value={passwordInput}
+                    onChange={(e) => {
+                      setPasswordInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Enter your password..."
+                  />
+                </div>
+                {registerError && (
+                  <p className="text-red-500 text-xs mt-2">{registerError}</p>
+                )}
+                <button 
+                  onClick={handleLogin}
+                  className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-3"
+                >
+                  <TypewriterText text="Log In" /> <AnimatedLock />
+                </button>
+                <p className="text-center text-sm text-gray-500 mt-4">
+                  Don't have an account? <button onClick={() => setAuthMode('register')} className="text-black font-semibold underline">Register</button>
+                </p>
+              </>
+            )}
+
+            {authMode === 'verify' && (
+              <>
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600">Please set a password to secure your identity key. This password will be required to log in on any device.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Password</label>
+                  <input 
+                    type="password" 
+                    value={passwordInput}
+                    onChange={(e) => {
+                      setPasswordInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Create a strong password..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">Confirm Password</label>
+                  <input 
+                    type="password" 
+                    value={confirmPasswordInput}
+                    onChange={(e) => {
+                      setConfirmPasswordInput(e.target.value);
+                      setRegisterError('');
+                    }}
+                    className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
+                    placeholder="Confirm your password..."
+                  />
+                </div>
+                {registerError && (
+                  <p className="text-red-500 text-xs mt-2">{registerError}</p>
+                )}
+                <button 
+                  onClick={handleVerify}
+                  className="w-full py-3 bg-black text-white rounded-xl font-semibold hover:bg-gray-800 transition-colors flex items-center justify-center gap-3"
+                >
+                  <TypewriterText text="Verify & Initialize Identity" /> <AnimatedLock />
+                </button>
+              </>
+            )}
           </div>
           <p className="mt-6 text-[10px] text-gray-400 text-center uppercase tracking-widest leading-relaxed">
             GiG Messaging Network
