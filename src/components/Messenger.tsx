@@ -40,6 +40,13 @@ interface Group {
   unread_count: number;
 }
 
+interface Reaction {
+  id: string;
+  user_id: string;
+  username: string;
+  emoji: string;
+}
+
 interface Message {
   id: string;
   groupId: string;
@@ -54,6 +61,7 @@ interface Message {
   replyToIv?: string;
   replyToSenderName?: string;
   decryptedReplyContent?: string;
+  reactions?: Reaction[];
 }
 
 export default function Messenger() {
@@ -89,6 +97,12 @@ export default function Messenger() {
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'verify'>('login');
   const [verificationToken, setVerificationToken] = useState('');
   const [verificationMessage, setVerificationMessage] = useState('');
+  
+  const [showUserIds, setShowUserIds] = useState(() => localStorage.getItem('gig_show_ids') === 'true');
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => localStorage.getItem('gig_notifications') !== 'false');
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('gig_sound') !== 'false');
+  const [showGroupSettings, setShowGroupSettings] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
   
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
@@ -181,6 +195,28 @@ export default function Messenger() {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ userId: user.id })
                 });
+              } else {
+                // Play sound/vibrate if notifications enabled
+                const notificationsEnabled = localStorage.getItem('gig_notifications') !== 'false';
+                const soundEnabled = localStorage.getItem('gig_sound') !== 'false';
+                
+                if (notificationsEnabled) {
+                  if (soundEnabled) {
+                    try {
+                      // A simple beep using Web Audio API
+                      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+                      const osc = ctx.createOscillator();
+                      osc.type = 'sine';
+                      osc.frequency.setValueAtTime(880, ctx.currentTime);
+                      osc.connect(ctx.destination);
+                      osc.start();
+                      osc.stop(ctx.currentTime + 0.1);
+                    } catch (e) {}
+                  }
+                  if (navigator.vibrate) {
+                    navigator.vibrate(200);
+                  }
+                }
               }
               
               // Update groups list (last message and unread count)
@@ -210,6 +246,20 @@ export default function Messenger() {
             }
             return prev;
           });
+        } else if (data.type === 'reaction') {
+          if (activeGroupRef.current?.id === data.groupId) {
+            setMessages(prev => prev.map(m => {
+              if (m.id === data.messageId) {
+                const reactions = m.reactions || [];
+                if (data.action === 'added') {
+                  return { ...m, reactions: [...reactions, { id: data.id || Date.now().toString(), user_id: data.userId, username: data.username, emoji: data.emoji }] };
+                } else {
+                  return { ...m, reactions: reactions.filter(r => !(r.user_id === data.userId && r.emoji === data.emoji)) };
+                }
+              }
+              return m;
+            }));
+          }
         }
       };
 
@@ -473,6 +523,35 @@ export default function Messenger() {
   const filteredGroups = groups.filter(g => 
     g.name.toLowerCase().includes(groupSearchQuery.toLowerCase())
   );
+
+  const handleReaction = async (messageId: string, emoji: string) => {
+    if (!user || !activeGroup) return;
+    try {
+      const res = await fetch(`/api/messages/${messageId}/reactions/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id, emoji })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Send via websocket
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'reaction',
+            groupId: activeGroup.id,
+            messageId,
+            userId: user.id,
+            username: user.username,
+            emoji,
+            action: data.action,
+            id: data.id
+          }));
+        }
+      }
+    } catch (e) {
+      console.error("Failed to toggle reaction", e);
+    }
+  };
 
   const handleTyping = (e: ChangeEvent<HTMLInputElement>) => {
     setNewMessage(e.target.value);
@@ -743,6 +822,10 @@ export default function Messenger() {
 
   const handleRotateIdentity = async () => {
     if (!user) return;
+    
+    const password = prompt("Please enter your password to secure your new identity keys:");
+    if (!password) return;
+
     if (!confirm("WARNING: Rotating your identity will generate a new public/private key pair. You will NOT be able to read existing messages in your current groups until they are re-keyed for your new identity. Continue?")) return;
 
     setIsRotating(true);
@@ -750,24 +833,53 @@ export default function Messenger() {
       const { publicKey, privateKey } = await generateIdentityKeyPair();
       const pubKeyBase64 = await exportPublicKey(publicKey);
       const privKeyBase64 = await exportIdentityPrivateKey(privateKey);
+      
+      const encryptedPrivKey = await encryptPrivateKeyWithPassword(privateKey, password);
 
       const res = await fetch(`/api/users/${user.id}/keys`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ publicKey: pubKeyBase64 })
+        body: JSON.stringify({ 
+          publicKey: pubKeyBase64,
+          encryptedPrivateKey: encryptedPrivKey.encryptedKey,
+          privateKeyIv: encryptedPrivKey.iv
+        })
       });
 
       if (res.ok) {
         privateKeyRef.current = privateKey;
-        const updatedUser = { ...user, publicKey: pubKeyBase64, privateKey: privKeyBase64 };
+        const updatedUser = { 
+          ...user, 
+          publicKey: pubKeyBase64, 
+          privateKey: privKeyBase64,
+          encrypted_private_key: encryptedPrivKey.encryptedKey,
+          private_key_iv: encryptedPrivKey.iv
+        };
         setUser(updatedUser);
         localStorage.setItem('gig_big_user', JSON.stringify(updatedUser));
         alert("Identity rotated successfully. You may need to be re-invited to groups to read new messages.");
       }
     } catch (e) {
       console.error("Failed to rotate identity", e);
+      alert("Failed to rotate identity. Please check your password and try again.");
     } finally {
       setIsRotating(false);
+    }
+  };
+
+  const handleClearAllUnread = async () => {
+    if (!user) return;
+    if (!confirm("Are you sure you want to mark all messages in all groups as read?")) return;
+
+    try {
+      const res = await fetch(`/api/users/${user.id}/clear-unread`, {
+        method: 'PUT'
+      });
+      if (res.ok) {
+        fetchGroups(user.id);
+      }
+    } catch (e) {
+      console.error("Failed to clear unread counts", e);
     }
   };
 
@@ -1011,6 +1123,13 @@ export default function Messenger() {
             <span className="text-[11px] font-bold uppercase tracking-widest text-gray-400">Encrypted Groups</span>
             <div className="flex items-center gap-1">
               <button 
+                onClick={handleClearAllUnread}
+                className="p-1 hover:bg-gray-100 rounded-lg transition-colors text-gray-400 hover:text-black"
+                title="Mark all as read"
+              >
+                <Check size={18} />
+              </button>
+              <button 
                 onClick={() => {
                   if (user) fetchAllUsers(user.id);
                   setShowUserSearch(true);
@@ -1127,6 +1246,13 @@ export default function Messenger() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Search messages..."
+                  value={messageSearchQuery}
+                  onChange={(e) => setMessageSearchQuery(e.target.value)}
+                  className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500 w-40"
+                />
                 <button 
                   onClick={() => {
                     fetchGroupMembers(activeGroup.id);
@@ -1153,6 +1279,13 @@ export default function Messenger() {
                   <Link size={16} />
                 </button>
                 <button 
+                  onClick={() => setShowGroupSettings(true)}
+                  className="p-1.5 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors text-gray-600"
+                  title="Group Settings"
+                >
+                  <Settings size={16} />
+                </button>
+                <button 
                   onClick={handleLeaveGroup}
                   className="p-1.5 bg-red-50 hover:bg-red-100 rounded-lg transition-colors text-red-600"
                   title="Leave Group"
@@ -1164,7 +1297,7 @@ export default function Messenger() {
 
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
               <AnimatePresence initial={false}>
-                {messages.map((msg) => (
+                {messages.filter(m => !messageSearchQuery || m.decryptedContent?.toLowerCase().includes(messageSearchQuery.toLowerCase())).map((msg) => (
                   <motion.div
                     key={msg.id}
                     initial={{ opacity: 0, y: 10 }}
@@ -1194,14 +1327,37 @@ export default function Messenger() {
                       )}
                       {msg.decryptedContent}
                       
-                      <button 
-                        onClick={() => setReplyingTo(msg)}
-                        className={`absolute top-0 p-1.5 bg-white shadow-md rounded-full opacity-0 group-hover:opacity-100 transition-opacity ${
-                          msg.senderId === user.id ? '-left-10 text-black' : '-right-10 text-black'
-                        }`}
-                      >
-                        <Reply size={14} />
-                      </button>
+                      <div className={`absolute top-0 flex gap-1 p-1.5 bg-white shadow-md rounded-full opacity-0 group-hover:opacity-100 transition-opacity ${
+                        msg.senderId === user.id ? '-left-24' : '-right-24'
+                      }`}>
+                        <button 
+                          onClick={() => setReplyingTo(msg)}
+                          className="p-1 hover:bg-gray-100 rounded-full text-black"
+                          title="Reply"
+                        >
+                          <Reply size={14} />
+                        </button>
+                        <button onClick={() => handleReaction(msg.id, '👍')} className="p-1 hover:bg-gray-100 rounded-full">👍</button>
+                        <button onClick={() => handleReaction(msg.id, '❤️')} className="p-1 hover:bg-gray-100 rounded-full">❤️</button>
+                      </div>
+
+                      {msg.reactions && msg.reactions.length > 0 && (
+                        <div className={`absolute -bottom-3 flex gap-1 ${msg.senderId === user.id ? 'right-0' : 'left-0'}`}>
+                          {Array.from(new Set(msg.reactions.map(r => r.emoji))).map(emoji => {
+                            const count = msg.reactions!.filter(r => r.emoji === emoji).length;
+                            const hasReacted = msg.reactions!.some(r => r.emoji === emoji && r.user_id === user.id);
+                            return (
+                              <button
+                                key={emoji}
+                                onClick={() => handleReaction(msg.id, emoji)}
+                                className={`text-[10px] px-1.5 py-0.5 rounded-full border ${hasReacted ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-white border-gray-200 text-gray-600'} shadow-sm`}
+                              >
+                                {emoji} {count > 1 && count}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 ))}
@@ -1329,6 +1485,53 @@ export default function Messenger() {
                   <p className="mt-2 text-[10px] text-gray-400 italic serif">
                     This is your unique cryptographic identity. Others use this to encrypt messages for you.
                   </p>
+                </div>
+
+                <div className="pt-4 border-t border-black/5 space-y-4">
+                  <h4 className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Preferences</h4>
+                  
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold">Show User IDs</span>
+                    <button 
+                      onClick={() => {
+                        const newVal = !showUserIds;
+                        setShowUserIds(newVal);
+                        localStorage.setItem('gig_show_ids', newVal.toString());
+                      }}
+                      className={`w-10 h-6 rounded-full transition-colors relative ${showUserIds ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                    >
+                      <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${showUserIds ? 'translate-x-5' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold">Enable Notifications</span>
+                    <button 
+                      onClick={() => {
+                        const newVal = !notificationsEnabled;
+                        setNotificationsEnabled(newVal);
+                        localStorage.setItem('gig_notifications', newVal.toString());
+                      }}
+                      className={`w-10 h-6 rounded-full transition-colors relative ${notificationsEnabled ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                    >
+                      <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${notificationsEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold">Notification Sounds</span>
+                    <button 
+                      onClick={() => {
+                        const newVal = !soundEnabled;
+                        setSoundEnabled(newVal);
+                        localStorage.setItem('gig_sound', newVal.toString());
+                      }}
+                      disabled={!notificationsEnabled}
+                      className={`w-10 h-6 rounded-full transition-colors relative ${soundEnabled && notificationsEnabled ? 'bg-emerald-500' : 'bg-gray-300'} ${!notificationsEnabled && 'opacity-50 cursor-not-allowed'}`}
+                    >
+                      <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${soundEnabled && notificationsEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="pt-4 border-t border-black/5 space-y-3">

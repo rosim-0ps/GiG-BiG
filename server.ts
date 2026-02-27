@@ -66,6 +66,14 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     reply_to_id TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    id TEXT PRIMARY KEY,
+    message_id TEXT,
+    user_id TEXT,
+    emoji TEXT,
+    UNIQUE(message_id, user_id, emoji)
+  );
 `);
 
 async function startServer() {
@@ -154,8 +162,13 @@ async function startServer() {
   });
 
   app.put("/api/users/:userId/keys", (req, res) => {
-    const { publicKey } = req.body;
-    db.prepare("UPDATE users SET public_key = ? WHERE id = ?").run(publicKey, req.params.userId);
+    const { publicKey, encryptedPrivateKey, privateKeyIv } = req.body;
+    db.prepare("UPDATE users SET public_key = ?, encrypted_private_key = ?, private_key_iv = ? WHERE id = ?").run(publicKey, encryptedPrivateKey, privateKeyIv, req.params.userId);
+    res.json({ success: true });
+  });
+
+  app.put("/api/users/:userId/clear-unread", (req, res) => {
+    db.prepare("UPDATE group_members SET last_read_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(req.params.userId);
     res.json({ success: true });
   });
 
@@ -175,6 +188,22 @@ async function startServer() {
         res.status(500).json({ error: "Failed to create group" });
       }
     }
+  });
+
+  app.put("/api/groups/:groupId", (req, res) => {
+    const { name } = req.body;
+    try {
+      db.prepare("UPDATE groups SET name = ? WHERE id = ?").run(name, req.params.groupId);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: "Group name already exists or invalid" });
+    }
+  });
+
+  app.put("/api/groups/:groupId/members/:userId/role", (req, res) => {
+    const { role } = req.body;
+    db.prepare("UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?").run(role, req.params.groupId, req.params.userId);
+    res.json({ success: true });
   });
 
   app.get("/api/groups/:userId", (req, res) => {
@@ -278,7 +307,45 @@ async function startServer() {
       ORDER BY m.created_at ASC 
       LIMIT 100
     `).all(req.params.groupId);
+
+    const messageIds = messages.map((m: any) => m.id);
+    if (messageIds.length > 0) {
+      const placeholders = messageIds.map(() => '?').join(',');
+      const reactions = db.prepare(`
+        SELECT mr.*, u.username 
+        FROM message_reactions mr
+        JOIN users u ON mr.user_id = u.id
+        WHERE mr.message_id IN (${placeholders})
+      `).all(...messageIds);
+      
+      const reactionsByMsg = reactions.reduce((acc: any, r: any) => {
+        if (!acc[r.message_id]) acc[r.message_id] = [];
+        acc[r.message_id].push(r);
+        return acc;
+      }, {});
+      
+      messages.forEach((m: any) => {
+        m.reactions = reactionsByMsg[m.id] || [];
+      });
+    } else {
+      messages.forEach((m: any) => m.reactions = []);
+    }
+
     res.json(messages);
+  });
+
+  app.post("/api/messages/:messageId/reactions/toggle", (req, res) => {
+    const { userId, emoji } = req.body;
+    const existing = db.prepare("SELECT id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?").get(req.params.messageId, userId, emoji) as any;
+    
+    if (existing) {
+      db.prepare("DELETE FROM message_reactions WHERE id = ?").run(existing.id);
+      res.json({ action: 'removed', emoji, userId });
+    } else {
+      const id = uuidv4();
+      db.prepare("INSERT INTO message_reactions (id, message_id, user_id, emoji) VALUES (?, ?, ?, ?)").run(id, req.params.messageId, userId, emoji);
+      res.json({ action: 'added', emoji, userId, id });
+    }
   });
 
   app.post("/api/groups/:groupId/read", (req, res) => {
@@ -369,6 +436,27 @@ async function startServer() {
             if (client && client.readyState === WebSocket.OPEN) {
               client.send(payload);
             }
+          }
+        });
+      }
+      if (message.type === "reaction") {
+        const { groupId, messageId, userId, username, emoji, action } = message;
+        const members = db.prepare("SELECT user_id FROM group_members WHERE group_id = ?").all(groupId) as any[];
+        
+        const payload = JSON.stringify({
+          type: "reaction",
+          groupId,
+          messageId,
+          userId,
+          username,
+          emoji,
+          action
+        });
+
+        members.forEach(member => {
+          const client = clients.get(member.user_id);
+          if (client && client.readyState === WebSocket.OPEN) {
+            client.send(payload);
           }
         });
       }
