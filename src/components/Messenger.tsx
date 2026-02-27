@@ -80,6 +80,7 @@ export default function Messenger() {
   const [showProfile, setShowProfile] = useState(false);
   const [profileUsername, setProfileUsername] = useState('');
   const [isRotating, setIsRotating] = useState(false);
+  const [registerError, setRegisterError] = useState('');
   
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
@@ -205,6 +206,7 @@ export default function Messenger() {
 
   const handleRegister = async () => {
     if (!usernameInput) return;
+    setRegisterError('');
     const keyPair = await generateIdentityKeyPair();
     privateKeyRef.current = keyPair.privateKey;
     const publicKey = await exportPublicKey(keyPair.publicKey);
@@ -214,6 +216,13 @@ export default function Messenger() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: usernameInput, publicKey }),
     });
+    
+    if (!res.ok) {
+      const errorData = await res.json();
+      setRegisterError(errorData.error || 'Registration failed');
+      return;
+    }
+    
     const userData = await res.json();
     setUser(userData);
     localStorage.setItem('gig_big_user', JSON.stringify({ 
@@ -757,10 +766,16 @@ export default function Messenger() {
               <input 
                 type="text" 
                 value={usernameInput}
-                onChange={(e) => setUsernameInput(e.target.value)}
-                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all"
+                onChange={(e) => {
+                  setUsernameInput(e.target.value);
+                  setRegisterError('');
+                }}
+                className={`w-full px-4 py-3 bg-gray-50 border ${registerError ? 'border-red-500' : 'border-gray-200'} rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all`}
                 placeholder="Enter your handle..."
               />
+              {registerError && (
+                <p className="text-red-500 text-xs mt-2">{registerError}</p>
+              )}
             </div>
             <button 
               onClick={handleRegister}

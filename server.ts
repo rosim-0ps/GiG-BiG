@@ -69,17 +69,18 @@ async function startServer() {
   // API Routes
   app.post("/api/register", (req, res) => {
     const { username, publicKey } = req.body;
+    
+    const existingUser = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+    if (existingUser) {
+      return res.status(409).json({ error: "Username is already taken" });
+    }
+
     try {
       const id = uuidv4();
       db.prepare("INSERT INTO users (id, username, public_key) VALUES (?, ?, ?)").run(id, username, publicKey);
       res.json({ id, username, publicKey });
     } catch (e) {
-      const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username) as any;
-      if (user) {
-        res.json(user);
-      } else {
-        res.status(400).json({ error: "Registration failed" });
-      }
+      res.status(400).json({ error: "Registration failed" });
     }
   });
 
