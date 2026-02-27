@@ -235,8 +235,9 @@ export default function Messenger() {
     }
     
     const data = await res.json();
-    setVerificationMessage(`Verification link generated. In a real app, this would be emailed to ${data.email}. Click the link below to verify.`);
+    setVerificationMessage(`In a real app, a verification link would be emailed to ${data.email}. For this demo, we've automatically verified your email and moved you to the next step.`);
     setVerificationToken(data.verification_token);
+    setAuthMode('verify');
   };
 
   const handleVerify = async () => {
