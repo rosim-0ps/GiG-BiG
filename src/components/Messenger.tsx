@@ -1603,6 +1603,106 @@ export default function Messenger() {
           </div>
         )}
 
+        {showGroupSettings && activeGroup && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full max-h-[80vh] flex flex-col"
+            >
+              <h3 className="text-xl font-bold mb-4 tracking-tight">Group Settings</h3>
+              
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Group Name</label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      value={newGroupName || activeGroup.name}
+                      onChange={(e) => setNewGroupName(e.target.value)}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+                      placeholder="Group Name"
+                      disabled={groupMembers.find(gm => gm.user_id === user?.id)?.role !== 'admin'}
+                    />
+                    {groupMembers.find(gm => gm.user_id === user?.id)?.role === 'admin' && (
+                      <button 
+                        onClick={async () => {
+                          if (!newGroupName || newGroupName === activeGroup.name) return;
+                          try {
+                            const res = await fetch(`/api/groups/${activeGroup.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ name: newGroupName })
+                            });
+                            if (res.ok) {
+                              setActiveGroup({ ...activeGroup, name: newGroupName });
+                              fetchGroups(user!.id);
+                              alert("Group name updated");
+                            }
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                        className="px-4 py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors"
+                      >
+                        Save
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {groupMembers.find(gm => gm.user_id === user?.id)?.role === 'admin' && (
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Manage Admins</label>
+                    <div className="max-h-40 overflow-y-auto space-y-2">
+                      {groupMembers.map(m => (
+                        <div key={m.user_id} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-black/5">
+                          <span className="text-sm font-semibold">{m.username}</span>
+                          {m.user_id !== user?.id && (
+                            <button
+                              onClick={async () => {
+                                const newRole = m.role === 'admin' ? 'member' : 'admin';
+                                try {
+                                  const res = await fetch(`/api/groups/${activeGroup.id}/members/${m.user_id}/role`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ role: newRole })
+                                  });
+                                  if (res.ok) {
+                                    fetchGroupMembers(activeGroup.id);
+                                  }
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                              className={`text-[10px] px-2 py-1 rounded-full border font-bold ${m.role === 'admin' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-white text-gray-500 border-gray-200'}`}
+                            >
+                              {m.role === 'admin' ? 'ADMIN' : 'MAKE ADMIN'}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6">
+                <button 
+                  onClick={() => {
+                    setShowGroupSettings(false);
+                    setNewGroupName('');
+                  }}
+                  className="w-full py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {showMembers && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <motion.div 
@@ -1624,10 +1724,10 @@ export default function Messenger() {
                       </div>
                       <div className="text-left">
                         <p className="font-bold text-sm">{m.username} {m.role === 'admin' && <span className="text-[9px] bg-black text-white px-1.5 py-0.5 rounded ml-1">ADMIN</span>}</p>
-                        <p className="text-[10px] font-mono text-gray-400">{m.user_id.slice(0, 12)}...</p>
+                        {showUserIds && <p className="text-[10px] font-mono text-gray-400">{m.user_id.slice(0, 12)}...</p>}
                       </div>
                     </div>
-                    {m.user_id !== user.id && (
+                    {m.user_id !== user.id && groupMembers.find(gm => gm.user_id === user.id)?.role === 'admin' && (
                       <button 
                         onClick={() => handleRemoveMember(m.user_id)}
                         className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -1690,7 +1790,7 @@ export default function Messenger() {
                       </div>
                       <div className="text-left">
                         <p className="font-bold text-sm">{u.username}</p>
-                        <p className="text-[10px] font-mono text-gray-400">{u.id.slice(0, 12)}...</p>
+                        {showUserIds && <p className="text-[10px] font-mono text-gray-400">{u.id.slice(0, 12)}...</p>}
                       </div>
                     </div>
                     <UserPlus size={18} className="text-gray-300" />
@@ -1745,7 +1845,7 @@ export default function Messenger() {
                       </div>
                       <div className="text-left">
                         <p className="font-bold text-sm">{u.username}</p>
-                        <p className="text-[10px] font-mono text-gray-400">{u.id.slice(0, 12)}...</p>
+                        {showUserIds && <p className="text-[10px] font-mono text-gray-400">{u.id.slice(0, 12)}...</p>}
                       </div>
                     </div>
                     <Send size={18} className="text-gray-300" />
