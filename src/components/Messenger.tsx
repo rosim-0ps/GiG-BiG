@@ -1366,24 +1366,6 @@ export default function Messenger() {
             </div>
 
             <div className="p-6 bg-white border-t border-black/5">
-              {replyingTo && (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="mb-4 p-3 bg-gray-50 border border-black/5 rounded-xl flex items-center justify-between"
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">Replying to {replyingTo.senderName}</p>
-                    <p className="text-xs text-gray-600 truncate">{replyingTo.decryptedContent}</p>
-                  </div>
-                  <button 
-                    onClick={() => setReplyingTo(null)}
-                    className="p-1 hover:bg-gray-200 rounded-full transition-colors text-gray-400"
-                  >
-                    <X size={16} />
-                  </button>
-                </motion.div>
-              )}
               {activeGroup && typingUsers[activeGroup.id]?.length > 0 && (
                 <motion.div 
                   initial={{ opacity: 0, y: 5 }}
@@ -1400,21 +1382,41 @@ export default function Messenger() {
                     : `${typingUsers[activeGroup.id].length} people are typing...`}
                 </motion.div>
               )}
-              <div className="relative flex items-center">
-                <input
-                  type="text"
-                  value={newMessage}
-                  onChange={handleTyping}
-                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  placeholder="Type a message..."
-                  className="w-full pl-4 pr-12 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-black/5 transition-all text-sm"
-                />
-                <button 
-                  onClick={sendMessage}
-                  className="absolute right-2 p-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors"
-                >
-                  <Send size={18} />
-                </button>
+              <div className="relative flex flex-col bg-gray-50 border border-gray-200 rounded-xl focus-within:ring-2 focus-within:ring-black/5 transition-all">
+                {replyingTo && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    className="p-3 bg-gray-100 border-b border-gray-200 rounded-t-xl flex items-center justify-between"
+                  >
+                    <div className="flex-1 min-w-0 border-l-2 border-emerald-500 pl-2">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-0.5">Replying to {replyingTo.senderName}</p>
+                      <p className="text-xs text-gray-600 truncate">{replyingTo.decryptedContent}</p>
+                    </div>
+                    <button 
+                      onClick={() => setReplyingTo(null)}
+                      className="p-1 hover:bg-gray-200 rounded-full transition-colors text-gray-400 ml-2"
+                    >
+                      <X size={16} />
+                    </button>
+                  </motion.div>
+                )}
+                <div className="relative flex items-center">
+                  <input
+                    type="text"
+                    value={newMessage}
+                    onChange={handleTyping}
+                    onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                    placeholder="Type a message..."
+                    className={`w-full pl-4 pr-12 py-3 bg-transparent focus:outline-none text-sm ${replyingTo ? 'rounded-b-xl' : 'rounded-xl'}`}
+                  />
+                  <button 
+                    onClick={sendMessage}
+                    className="absolute right-2 p-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors"
+                  >
+                    <Send size={18} />
+                  </button>
+                </div>
               </div>
             </div>
           </>
